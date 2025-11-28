@@ -1,0 +1,189 @@
+import requests
+import json
+import csv
+from datetime import datetime, timedelta, timezone
+from collections import Counter, defaultdict
+
+
+
+
+# --- Helper Function ---
+def run_query(query: str, variables: dict = None) -> dict:
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+    response = requests.post(URL, json={"query": query, "variables": variables}, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    if "errors" in data:
+        raise RuntimeError(f"GraphQL error: {data['errors']}")
+    return data
+
+# --- GraphQL Queries ---
+COMMITS_QUERY = """
+query($projectPath: ID!, $branch: String!, $cursor: String) {
+  project(fullPath: $projectPath) {
+    repository {
+      commits(first: 100, ref: $branch, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            sha
+            authorName
+            authoredDate
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+MERGE_REQUESTS_QUERY = """
+query($projectPath: ID!, $cursor: String) {
+  project(fullPath: $projectPath) {
+    mergeRequests(first: 100, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      edges {
+        node {
+          title
+          state
+          createdAt
+          mergedAt
+          author {
+            username
+            name
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# --- Fetch Commits ---
+def fetch_commits_last_30_days():
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    all_commits = []
+    cursor = None
+
+    while True:
+        data = run_query(COMMITS_QUERY, {
+            "projectPath": PROJECT_PATH,
+            "branch": BRANCH,
+            "cursor": cursor
+        })
+        commits = data["data"]["project"]["repository"]["commits"]["edges"]
+        page_info = data["data"]["project"]["repository"]["commits"]["pageInfo"]
+
+        for edge in commits:
+            node = edge["node"]
+            date = datetime.fromisoformat(node["authoredDate"].replace("Z", "+00:00"))
+            if date >= cutoff:
+                all_commits.append(node)
+            else:
+                return all_commits
+
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+
+    return all_commits
+
+# --- Fetch Merge Requests ---
+def fetch_merge_requests_last_30_days():
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    all_mrs = []
+    cursor = None
+
+    while True:
+        data = run_query(MERGE_REQUESTS_QUERY, {
+            "projectPath": PROJECT_PATH,
+            "cursor": cursor
+        })
+        mrs = data["data"]["project"]["mergeRequests"]["edges"]
+        page_info = data["data"]["project"]["mergeRequests"]["pageInfo"]
+
+        for edge in mrs:
+            node = edge["node"]
+            date = datetime.fromisoformat(node["createdAt"].replace("Z", "+00:00"))
+            if date >= cutoff:
+                all_mrs.append(node)
+            else:
+                return all_mrs
+
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+
+    return all_mrs
+
+# --- CSV Writers ---
+def write_commits_to_csv(commits, filename="commits_last_30_days.csv"):
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["SHA", "Author", "Date"])
+        for c in commits:
+            writer.writerow([c["sha"], c["authorName"], c["authoredDate"]])
+    print(f"✅ Wrote {len(commits)} commits to {filename}")
+
+def write_author_commit_totals(commits, filename="author_commit_totals.csv"):
+    author_counts = Counter(c["authorName"] for c in commits)
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Author", "Total Commits (Last 30 Days)"])
+        for author, count in author_counts.items():
+            writer.writerow([author, count])
+    print(f"✅ Wrote totals for {len(author_counts)} authors to {filename}")
+
+def write_merge_requests_to_csv(mrs, filename="merge_requests_last_30_days.csv"):
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Title", "Author", "State", "CreatedAt", "MergedAt"])
+        for mr in mrs:
+            writer.writerow([
+                mr["title"],
+                mr["author"]["name"] if mr["author"] else "Unknown",
+                mr["state"],
+                mr["createdAt"],
+                mr.get("mergedAt", "")
+            ])
+    print(f"✅ Wrote {len(mrs)} merge requests to {filename}")
+
+def write_author_mr_totals(mrs, filename="author_merge_request_totals.csv"):
+    totals = defaultdict(lambda: {"opened": 0, "merged": 0, "closed": 0})
+    for mr in mrs:
+        author = mr["author"]["name"] if mr["author"] else "Unknown"
+        state = mr["state"].lower()
+        if state in totals[author]:
+            totals[author][state] += 1
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Author", "Opened", "Merged", "Closed"])
+        for author, counts in totals.items():
+            writer.writerow([author, counts["opened"], counts["merged"], counts["closed"]])
+    print(f"✅ Wrote merge request totals for {len(totals)} authors to {filename}")
+
+# --- Main ---
+def main():
+    commits = fetch_commits_last_30_days()
+    mrs = fetch_merge_requests_last_30_days()
+
+    # Commits
+    write_commits_to_csv(commits)
+    write_author_commit_totals(commits)
+
+    # Merge Requests
+    write_merge_requests_to_csv(mrs)
+    write_author_mr_totals(mrs)
+
+if __name__ == "__main__":
+    main()
+
+# 0131 523 2222
+
